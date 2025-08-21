@@ -1,0 +1,207 @@
+import psycopg2
+from psycopg2 import extras
+import hashlib
+
+class Database:
+    """A class to handle all database interactions."""
+    
+    def __init__(self, dbname, user, password, host, port):
+        self.conn_params = {
+            "dbname": dbname,
+            "user": user,
+            "password": password,
+            "host": host,
+            "port": port
+        }
+    
+    def get_connection(self):
+        """Establishes and returns a database connection."""
+        try:
+            conn = psycopg2.connect(**self.conn_params)
+            return conn
+        except psycopg2.OperationalError as e:
+            print(f"Error connecting to database: {e}")
+            return None
+
+    def execute_query(self, query, params=None, fetch=True):
+        """Executes a database query and returns results."""
+        conn = self.get_connection()
+        if not conn:
+            return None
+        
+        try:
+            with conn.cursor(cursor_factory=extras.DictCursor) as cur:
+                cur.execute(query, params or [])
+                conn.commit()
+                if fetch:
+                    return cur.fetchall()
+        except psycopg2.Error as e:
+            print(f"Database error: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
+    # --- Authentication (C) ---
+    def authenticate_user(self, username, password):
+        """Authenticates a user and returns their role."""
+        query = "SELECT role FROM users WHERE username = %s AND password_hash = %s"
+        password_hash = password # Simple for this example, use hashing in production
+        result = self.execute_query(query, (username, password_hash), fetch=True)
+        return result[0]['role'] if result else None
+
+    # --- Employee CRUD Operations ---
+
+    # Create (C)
+    def create_employee(self, data):
+        """Inserts a new employee record."""
+        query = """
+        INSERT INTO employees (
+            first_name, last_name, date_of_birth, gender, contact_number, email, 
+            job_id, dept_id, manager_id, date_of_joining, employment_status, 
+            salary, pay_grade, emergency_contact_name, emergency_contact_phone
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        """
+        # Ensure data integrity for foreign keys
+        job_id = self.get_job_id_by_title(data['job_title'])
+        dept_id = self.get_dept_id_by_name(data['department'])
+        
+        params = (
+            data['first_name'], data['last_name'], data['date_of_birth'], data['gender'],
+            data['contact_number'], data['email'], job_id, dept_id,
+            data['manager_id'] or None, data['date_of_joining'], data['employment_status'],
+            data['salary'] or None, data['pay_grade'], data['emergency_contact_name'],
+            data['emergency_contact_phone']
+        )
+        self.execute_query(query, params, fetch=False)
+
+    # Read (R)
+    def get_all_employees(self):
+        """Retrieves all employee records with department and job titles."""
+        query = """
+        SELECT 
+            e.emp_id, e.first_name, e.last_name, e.email, e.date_of_joining, e.employment_status, 
+            d.dept_name, j.job_title, e.salary
+        FROM employees e
+        LEFT JOIN departments d ON e.dept_id = d.dept_id
+        LEFT JOIN job_titles j ON e.job_id = j.job_id
+        ORDER BY e.first_name
+        """
+        return self.execute_query(query)
+
+    def search_employees(self, search_term, search_by):
+        """Searches for employees based on a term and criteria."""
+        query = f"""
+        SELECT 
+            e.emp_id, e.first_name, e.last_name, e.email, e.date_of_joining, e.employment_status, 
+            d.dept_name, j.job_title, e.salary
+        FROM employees e
+        LEFT JOIN departments d ON e.dept_id = d.dept_id
+        LEFT JOIN job_titles j ON e.job_id = j.job_id
+        WHERE {search_by} ILIKE %s
+        """
+        return self.execute_query(query, (f"%{search_term}%",))
+
+    def get_employee_details(self, emp_id):
+        """Retrieves a single employee's full details."""
+        query = """
+        SELECT 
+            e.*, d.dept_name, j.job_title
+        FROM employees e
+        LEFT JOIN departments d ON e.dept_id = d.dept_id
+        LEFT JOIN job_titles j ON e.job_id = j.job_id
+        WHERE e.emp_id = %s
+        """
+        result = self.execute_query(query, (emp_id,))
+        return result[0] if result else None
+    
+    # Update (U)
+    def update_employee(self, emp_id, data):
+        """Updates an existing employee record."""
+        query = """
+        UPDATE employees
+        SET
+            first_name = %s, last_name = %s, date_of_birth = %s, gender = %s, 
+            contact_number = %s, email = %s, job_id = %s, dept_id = %s, 
+            manager_id = %s, date_of_joining = %s, employment_status = %s, 
+            salary = %s, pay_grade = %s, emergency_contact_name = %s, 
+            emergency_contact_phone = %s
+        WHERE emp_id = %s
+        """
+        # Ensure data integrity for foreign keys
+        job_id = self.get_job_id_by_title(data['job_title'])
+        dept_id = self.get_dept_id_by_name(data['department'])
+        
+        params = (
+            data['first_name'], data['last_name'], data['date_of_birth'], data['gender'],
+            data['contact_number'], data['email'], job_id, dept_id,
+            data['manager_id'] or None, data['date_of_joining'], data['employment_status'],
+            data['salary'] or None, data['pay_grade'], data['emergency_contact_name'],
+            data['emergency_contact_phone'], emp_id
+        )
+        self.execute_query(query, params, fetch=False)
+
+    # Delete (D - Logical)
+    def deactivate_employee(self, emp_id):
+        """Logs a logical deletion by deactivating an employee."""
+        query = "UPDATE employees SET employment_status = 'Inactive' WHERE emp_id = %s"
+        self.execute_query(query, (emp_id,), fetch=False)
+
+    # --- Department CRUD Operations ---
+    def create_department(self, dept_name):
+        query = "INSERT INTO departments (dept_name) VALUES (%s)"
+        self.execute_query(query, (dept_name,), fetch=False)
+
+    def get_all_departments(self):
+        query = "SELECT dept_name FROM departments ORDER BY dept_name"
+        return [row['dept_name'] for row in self.execute_query(query)]
+
+    def get_dept_id_by_name(self, dept_name):
+        query = "SELECT dept_id FROM departments WHERE dept_name = %s"
+        result = self.execute_query(query, (dept_name,))
+        return result[0]['dept_id'] if result else None
+
+    # --- Job Title CRUD Operations ---
+    def create_job_title(self, job_title):
+        query = "INSERT INTO job_titles (job_title) VALUES (%s)"
+        self.execute_query(query, (job_title,), fetch=False)
+
+    def get_all_job_titles(self):
+        query = "SELECT job_title FROM job_titles ORDER BY job_title"
+        return [row['job_title'] for row in self.execute_query(query)]
+
+    def get_job_id_by_title(self, job_title):
+        query = "SELECT job_id FROM job_titles WHERE job_title = %s"
+        result = self.execute_query(query, (job_title,))
+        return result[0]['job_id'] if result else None
+
+    # --- Business Insights ---
+    def get_insights(self):
+        """Fetches various business insights from the employee data."""
+        insights = {}
+        
+        # COUNT: Total number of employees
+        insights['total_employees'] = self.execute_query("SELECT COUNT(*) FROM employees")[0]['count']
+        
+        # SUM: Total monthly payroll
+        insights['total_payroll'] = self.execute_query("SELECT SUM(salary) FROM employees WHERE employment_status = 'Active'")[0]['sum']
+        
+        # AVG: Average salary
+        insights['avg_salary'] = self.execute_query("SELECT AVG(salary) FROM employees WHERE employment_status = 'Active'")[0]['avg']
+        
+        # MIN/MAX: Minimum and Maximum salary
+        min_max_salaries = self.execute_query("SELECT MIN(salary), MAX(salary) FROM employees WHERE employment_status = 'Active'")[0]
+        insights['min_salary'] = min_max_salaries['min']
+        insights['max_salary'] = min_max_salaries['max']
+        
+        # COUNT: Employees per department
+        insights['employees_per_dept'] = self.execute_query("""
+        SELECT d.dept_name, COUNT(*) as count 
+        FROM employees e 
+        JOIN departments d ON e.dept_id = d.dept_id 
+        GROUP BY d.dept_name
+        """)
+        
+        return insights
